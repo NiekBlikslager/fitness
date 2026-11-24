@@ -4,16 +4,19 @@
 const KEY = 'fitness-v1';
 const MUSCLES = ['Borst', 'Lats', 'Bovenrug', 'Onderrug', 'Schouders', 'Biceps', 'Triceps', 'Onderarmen',
   'Buik', 'Billen', 'Quadriceps', 'Hamstrings', 'Adductoren', 'Kuiten'];
+/* Per oefening: spiergroep -> aandeel. Eén set telt voor dat deel mee. */
+const LEVELS = [[0, 'Niet'], [0.25, 'Beetje'], [0.5, 'Deels'], [1, 'Vooral']];
+const PULLUP = { Lats: 1, Bovenrug: 0.5, Schouders: 0.25, Biceps: 0.5, Onderarmen: 0.25 };
+const REPS_PER_SET = 8; // thuisoefeningen: zoveel herhalingen tellen als één set
 const EXAMPLES = [
-  ['Squat', 'weight', ['Quadriceps', 'Billen', 'Onderrug']],
-  ['Bench press', 'weight', ['Borst', 'Triceps', 'Schouders']],
-  ['Deadlift', 'weight', ['Hamstrings', 'Billen', 'Onderrug', 'Bovenrug']],
-  ['Shoulder press', 'weight', ['Schouders', 'Triceps']],
-  ['Barbell row', 'weight', ['Lats', 'Bovenrug', 'Biceps']],
-  ['Pull-up', 'weight', ['Lats', 'Bovenrug', 'Biceps']],
-  ['Plank', 'time', ['Buik']],
+  ['Squat', 'weight', { Quadriceps: 1, Billen: 1, Onderrug: 0.25, Adductoren: 0.5 }],
+  ['Bench press', 'weight', { Borst: 1, Triceps: 0.5, Schouders: 0.5 }],
+  ['Deadlift', 'weight', { Hamstrings: 1, Billen: 1, Onderrug: 1, Bovenrug: 0.5, Onderarmen: 0.5 }],
+  ['Shoulder press', 'weight', { Schouders: 1, Triceps: 0.5 }],
+  ['Barbell row', 'weight', { Lats: 1, Bovenrug: 1, Biceps: 0.5 }],
+  ['Pull-up', 'weight', PULLUP],
+  ['Plank', 'time', { Buik: 1 }],
 ];
-
 /* ---------- hulpfuncties ---------- */
 const $ = s => document.querySelector(s);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -41,11 +44,20 @@ const I = {
 };
 
 /* ---------- opslag ---------- */
-const fresh = () => ({ exercises: [], workouts: [], active: null, habits: [{ id: 'pullups', name: 'Pull-ups', goal: 0 }], logs: [] });
+const fresh = () => ({ exercises: [], workouts: [], active: null, habits: [{ id: 'pullups', name: 'Pull-ups', goal: 0, muscles: { ...PULLUP } }], logs: [] });
+/** Zet oudere gegevens om: spiergroepen waren eerst een lijst zonder aandeel. */
+function migrate(d) {
+  for (const e of d.exercises) if (Array.isArray(e.muscles)) {
+    const std = EXAMPLES.find(x => x[0] === e.name)?.[2] || {};
+    e.muscles = Object.fromEntries(e.muscles.map(m => [m, std[m] || 1]));
+  }
+  for (const h of d.habits) if (!h.muscles) h.muscles = h.id === 'pullups' ? { ...PULLUP } : {};
+  return d;
+}
 function load() {
   const raw = localStorage.getItem(KEY);
   if (!raw) return fresh();
-  try { return { ...fresh(), ...JSON.parse(raw) }; }
+  try { return migrate({ ...fresh(), ...JSON.parse(raw) }); }
   catch { localStorage.setItem(KEY + '-kapot', raw); return fresh(); }
 }
 let db = load();
@@ -57,7 +69,7 @@ function save() {
 }
 
 /* ---------- logica ---------- */
-const ex = id => db.exercises.find(e => e.id === id) || { id, name: 'Verwijderde oefening', type: 'weight', muscles: [] };
+const ex = id => db.exercises.find(e => e.id === id) || { id, name: 'Verwijderde oefening', type: 'weight', muscles: {} };
 const isTime = id => ex(id).type === 'time';
 const sorted = () => [...db.workouts].sort((a, b) => a.start - b.start);
 const setVol = s => s.w * s.r;
@@ -126,10 +138,65 @@ function lastSets(exId) {
   const prev = sorted().reverse().find(w => w.id !== a?.editId && w.start < (a?.start ?? Infinity) && w.entries.some(e => e.exId === exId));
   return prev ? prev.entries.find(e => e.exId === exId).sets : [];
 }
-function muscleSets(list) {
+/** Sets per spiergroep, gewogen naar aandeel; `logs` zijn thuisoefeningen. */
+function muscleSets(list, logs = []) {
   const m = {};
-  for (const w of list) for (const e of w.entries) for (const g of ex(e.exId).muscles) m[g] = (m[g] || 0) + e.sets.length;
+  const add = (mus, n) => { for (const g in mus) m[g] = (m[g] || 0) + n * mus[g]; };
+  for (const w of list) for (const e of w.entries) add(ex(e.exId).muscles, e.sets.length);
+  for (const l of logs) add(db.habits.find(h => h.id === l.hid)?.muscles || {}, l.n / REPS_PER_SET);
   return Object.entries(m).sort((a, b) => b[1] - a[1]);
+}
+const byShare = mus => Object.entries(mus).sort((a, b) => b[1] - a[1]);
+const musNames = mus => byShare(mus).map(x => x[0]).join(', ');
+/** Workouts en thuisoefeningen van de laatste `n` dagen (vandaag telt mee); 0 = alles. */
+function recent(n) {
+  const k = n ? dkey(addDays(Date.now(), 1 - n)) : '';
+  return [db.workouts.filter(w => dkey(w.start) >= k), db.logs.filter(l => l.day >= k)];
+}
+
+/* ---------- lichaam ---------- */
+/* Linkerhelft in een vak van 100 x 216; de rechterhelft is gespiegeld. */
+const BODY = 'M50 22 L45 23 C45 29 44 32 40 33.5 C34 35.5 28 36 25 41 C22 46 22 52 21 60 C19 68 17 74 16 84 C15 92 12 100 11 108 C9 112 9 118 11 121 C13 124 16 122 17 117 L18 109 C21 100 24 92 25 84 C26.5 77 28 72 29 64 C30 72 32 80 32 88 C31 95 29 101 28.5 109 C27.5 122 28.5 136 31 147 C29.5 156 30 166 33 178 C34 186 34.5 194 34 199 C32 204 30 208 32 210 C36 212 41 211 42 207 C43 201 42 196 42.5 188 C44 176 45.5 164 44.5 152 C46 142 48 128 49 115 L50 113 Z';
+const ARM = 'M23.5 55 C27 53 29 51 29.5 54 C30 60 28 67 26 71 C23.5 72 21.5 70 21 67 C21.5 62 22.5 58 23.5 55Z';
+const FORE = 'M20 72.5 C22 74 24 74 25.5 73.5 C25 82 22 93 18 104 L14 102 C16 92 17 80 20 72.5Z';
+const FRONT = [
+  ['Bovenrug', 'M45 28 C44.5 31 42 33 38 34.5 C41 36 45 37 49 37.5 L47 33Z'],
+  ['Schouders', 'M38 35.5 C32 36 27 37 25 43 C23.5 47 23.5 50 24 53 C28 51 31 47 33 42 C34.5 39 36 37 38 35.5Z'],
+  ['Borst', 'M49 40 C44 37.5 38 38 35 41 C32.5 46 31 50 31 53 C34 58 43 59 49 55Z'],
+  ['Biceps', ARM], ['Onderarmen', FORE],
+  ['Buik', 'M49 58 C44 60 40 60.5 37 61 C37 70 38 80 38 88 C41 96 45 102 49 105Z M35.5 60 C33 58 32 58 31 57 C32 66 34 78 33.5 90 C34.5 92 36 93 37 93 C36 82 35.5 70 35.5 60Z'],
+  ['Quadriceps', 'M33 98 C30 106 29.5 118 31 132 C32 140 34 145 37 146 C41 146 43 142 43.5 136 C44 124 41 108 33 98Z'],
+  ['Adductoren', 'M37 99 C42 106 46 110 49 113 C48.5 122 47 130 45.5 136 C45 122 42 108 37 99Z'],
+  ['Kuiten', 'M32.5 154 C31.5 164 33 174 36 186 C38 176 37 163 36 154Z M44 154 C44.5 164 43 174 41 184 C39.5 174 40 163 41 154Z'],
+];
+const BACK = [
+  ['Bovenrug', 'M49 25 L45.5 27 C45 31 42 33 35.5 35.5 C37 38 37 42 36 48 C40 52 45 60 49 72Z'],
+  ['Schouders', 'M34 36 C28 36.5 26 39 25 43 C23.5 47 23.5 50 24 53 C28 51 33 49 34.5 47 C36 42 35.5 39 34 36Z'],
+  ['Lats', 'M34.5 50 C32 51 31 53 30.5 56 C31 65 33 74 34 82 C39 84 44 80 47 76 C44 66 40 56 34.5 50Z'],
+  ['Onderrug', 'M49 76 C46 80 40 84.5 35 85.5 C34.5 89 34 91 33.5 94 C39 92 45 93 49 98Z'],
+  ['Triceps', ARM], ['Onderarmen', FORE],
+  ['Billen', 'M49 101 C44 95 37 94 33 97 C30 102 29.5 108 30 112 C34 118 44 119 49 114Z'],
+  ['Hamstrings', 'M30 116 C35 120 44 120 48.5 117 C48 128 46 140 44 148 C42 144 38 143 36 144 C34 146 33 147 32 147 C30 138 29 126 30 116Z'],
+  ['Kuiten', 'M32.5 150 C31 158 31 166 34 176 C36 180 40 180 42 176 C44.5 166 45 158 44 151 C41 148 36 148 32.5 150Z'],
+];
+/** Voor- en achterkant; `steps` = ondergrens (sets) van niveau 2, 3 en 4. */
+function bodyMap(rows, steps) {
+  const m = Object.fromEntries(rows);
+  const lvl = n => n > 0 ? 1 + steps.filter(s => n >= s).length : 0;
+  const half = parts => `<path d="${BODY}" fill="var(--body)"/>` + parts.map(([g, d]) => `<path d="${d}" fill="var(--h${lvl(m[g] || 0)})" data-tip="${g}: ${setsTxt(m[g] || 0)}"/>`).join('');
+  const fig = (parts, x, label) => `<g transform="translate(${x})"><ellipse cx="50" cy="13" rx="8.5" ry="11" fill="var(--body)"/><g>${half(parts)}</g><g transform="translate(100) scale(-1 1)">${half(parts)}</g><text x="50" y="226" text-anchor="middle">${label}</text></g>`;
+  return `<svg class="body" viewBox="0 0 200 230" role="img" aria-label="Getrainde spiergroepen: ${rows.map(r => `${r[0]} ${setsTxt(r[1])}`).join(', ') || 'geen'}">${fig(FRONT, 0, 'Voorkant')}${fig(BACK, 100, 'Achterkant')}</svg>`;
+}
+const n1 = n => nf(Math.round(n * 10) / 10);
+const setsTxt = n => `${n1(n)} ${n1(n) === '1' ? 'set' : 'sets'}`;
+const heatLegend = (a, b) => `<div class="legend"><span>${a}</span>${[0, 1, 2, 3, 4].map(i => `<i style="background:var(--h${i})"></i>`).join('')}<span>${b}</span></div>`;
+function weekBody() {
+  const rows = muscleSets(...recent(7));
+  return `<h2>Afgelopen 7 dagen</h2><div class="card">${bodyMap(rows, [3, 6, 10])}${heatLegend('0', '10+ sets')}<p class="mut" style="margin:8px 0 0">Tik op een spiergroep voor het aantal sets.</p></div>`;
+}
+function workoutBody(rows) {
+  const mx = rows[0]?.[1] || 1;
+  return bodyMap(rows, [mx * .25, mx * .5, mx * .75].map(x => x + 1e-6)) + heatLegend('minder', 'meer');
 }
 const volume = w => sum(w.entries.flatMap(e => e.sets.map(s => setVol(s) || 0)));
 const duration = w => w.end ? Math.round((w.end - w.start) / 60000) : 0;
@@ -151,8 +218,8 @@ function weekStreak() {
 }
 
 /* ---------- schermen ---------- */
-let ui = { tab: 'train', view: null, id: null, day: null, habit: null, period: 30, metric: 'w', q: '' };
-const TABS = [['train', 'Trainen', I.train], ['ex', 'Oefeningen', I.list], ['home', 'Thuis', I.home], ['stats', 'Statistieken', I.stats]];
+let ui = { tab: 'home', view: null, id: null, day: null, habit: null, period: 30, metric: 'w', q: '' };
+const TABS = [['home', 'Thuis', I.home], ['train', 'Trainen', I.train], ['ex', 'Oefeningen', I.list], ['stats', 'Statistieken', I.stats]];
 let lastScreen = '';
 
 function render() {
@@ -210,17 +277,16 @@ const isPR = (c, b, time) => !!(c && b.n && (time ? c.t > b.t : b.w || c.w ? c.w
 function hbars(rows, unit) {
   if (!rows.length) return '<p class="mut">Nog geen gegevens.</p>';
   const mx = Math.max(...rows.map(r => r[1]), 1);
-  return rows.map(([l, n]) => `<button class="hb" data-tip="${esc(l)}: ${nf(n)} ${n === 1 ? unit[0] : unit[1]}"><span>${esc(l)}</span><span><i class="${n ? '' : 'zero'}" style="width:${n / mx * 100}%"></i></span><span class="num">${nf(n)}</span></button>`).join('');
+  return rows.map(([l, n]) => `<button class="hb" data-tip="${esc(l)}: ${n1(n)} ${n1(n) === '1' ? unit[0] : unit[1]}"><span>${esc(l)}</span><span><i class="${n ? '' : 'zero'}" style="width:${n / mx * 100}%"></i></span><span class="num">${n1(n)}</span></button>`).join('');
 }
 
 function vDone() {
   const w = db.workouts.find(x => x.id === ui.id);
   if (!w) { ui.view = null; return vTrain(); }
   const prs = newPRs(w), mus = muscleSets([w]), v = volume(w), d = duration(w);
-  const justDone = ui.just === w.id;
-  let h = backBtn('Terug') + `<h1 style="margin-bottom:4px">${justDone ? 'Lekker getraind!' : esc(w.name)}</h1><p class="mut" style="margin-bottom:18px">${justDone ? esc(w.name) + ', ' : ''}${fdate(w.start, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>`;
+  let h = backBtn('Terug') + `<h1 style="margin-bottom:4px">${esc(w.name)}</h1><p class="mut" style="margin-bottom:18px">${fdate(w.start, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>`;
   if (prs.length) h += `<h2 style="margin-top:0">${plural(prs.length, 'nieuw PR', "nieuwe PR's")}</h2><div class="list">${prs.map(p => `<div class="item"><span><b>${esc(p.name)}</b><span class="mut">${p.label}</span></span><span class="end"><b>${p.now}</b><span class="mut">was ${p.old}</span></span></div>`).join('')}</div>`;
-  h += '<h2>Getrainde spiergroepen</h2><div class="card">' + (mus.length ? hbars(mus, ['set', 'sets']) + '<p class="mut" style="margin:8px 0 0">Aantal sets per spiergroep</p>' : '<p class="mut">Bij deze oefeningen zijn geen spiergroepen aangevinkt.</p>') + '</div>';
+  h += '<h2>Getrainde spiergroepen</h2><div class="card">' + (mus.length ? workoutBody(mus) + '<div style="height:14px"></div>' + hbars(mus, ['set', 'sets']) + '<p class="mut" style="margin:8px 0 0">Sets per spiergroep, naar aandeel</p>' : '<p class="mut">Bij deze oefeningen zijn geen spiergroepen aangevinkt.</p>') + '</div>';
   h += `<div class="tiles"><div class="tile"><b>${sum(w.entries.map(e => e.sets.length))}</b><span>sets</span></div>`
     + (v ? `<div class="tile"><b>${nf(v)} <small>kg</small></b><span>totaal verplaatst</span></div>` : '')
     + (d > 0 ? `<div class="tile"><b>${d} <small>min</small></b><span>duur</span></div>` : '') + '</div>';
@@ -232,7 +298,7 @@ function vDone() {
 function exRows(q, act) {
   return db.exercises.filter(e => !e.archived && e.name.toLowerCase().includes(q.toLowerCase())).sort((a, b) => a.name.localeCompare(b.name, 'nl'))
     .map(e => { const b = act === 'exopen' ? best(e.id) : null;
-      return `<button class="item" data-a="${act}" data-v="${e.id}"><span><b>${esc(e.name)}</b><span class="mut">${esc(e.muscles.join(', ')) || 'Geen spiergroepen'}</span></span>${b && b.n ? `<span class="end">${e.type === 'time' ? ftime(b.t) : b.w ? nf(b.w) + ' kg' : nf(b.reps) + ' herh.'}</span>` : ''}</button>`; }).join('');
+      return `<button class="item" data-a="${act}" data-v="${e.id}"><span><b>${esc(e.name)}</b><span class="mut">${esc(musNames(e.muscles)) || 'Geen spiergroepen'}</span></span>${b && b.n ? `<span class="end">${e.type === 'time' ? ftime(b.t) : b.w ? nf(b.w) + ' kg' : nf(b.reps) + ' herh.'}</span>` : ''}</button>`; }).join('');
 }
 function vExercises() {
   let h = '<h1>Oefeningen</h1><button class="btn pri" data-a="exnew" style="margin-bottom:16px">Nieuwe oefening</button>';
@@ -242,7 +308,7 @@ function vExercises() {
 
 function vExercise() {
   const e = ex(ui.id), time = e.type === 'time', b = best(e.id);
-  let h = backBtn('Oefeningen') + `<h1 style="margin-bottom:8px">${esc(e.name)}</h1><div style="margin-bottom:16px">${e.muscles.map(m => `<span class="tag">${m}</span>`).join('')}</div>`;
+  let h = backBtn('Oefeningen') + `<h1 style="margin-bottom:8px">${esc(e.name)}</h1><div style="margin-bottom:16px">${byShare(e.muscles).map(([m, v]) => `<span class="tag">${m} <small>${LEVELS.find(l => l[0] === v)?.[1].toLowerCase() ?? ''}</small></span>`).join('')}</div>`;
   if (b.n) {
     h += `<h2>PR's</h2><div class="list">${prLines(b, time).map(([l, v]) => `<div class="item"><span>${l}</span><span class="end"><b>${v}</b></span></div>`).join('')}</div>`;
     const metric = time ? 't' : !b.w ? 'reps' : ui.metric;
@@ -275,7 +341,7 @@ function curHabit() { return db.habits.find(h => h.id === ui.habit) || db.habits
 function vHome() {
   const h0 = curHabit(), today = dkey(Date.now()), day = ui.day || today, tot = dayTotals(h0.id);
   const n = tot[day] || 0, entries = db.logs.filter(l => l.hid === h0.id && l.day === day);
-  let h = '<h1>Thuis</h1><div class="chips" style="margin-bottom:14px">' + db.habits.map(x => `<button class="chip" data-a="habit" data-v="${x.id}" aria-pressed="${x.id === h0.id}">${esc(x.name)}</button>`).join('') + '<button class="chip" data-a="habitnew">+ Nieuw</button></div>';
+  let h = '<h1>Thuis</h1>' + (db.active ? '<button class="btn pri" data-a="resume" style="margin-bottom:14px">Verder met je workout</button>' : '') + '<div class="chips" style="margin-bottom:14px">' + db.habits.map(x => `<button class="chip" data-a="habit" data-v="${x.id}" aria-pressed="${x.id === h0.id}">${esc(x.name)}</button>`).join('') + '<button class="chip" data-a="habitnew">+ Nieuw</button></div>';
   h += `<section class="card big"><div class="mut">${day === today ? 'Vandaag' : fdate(fromKey(day), { weekday: 'long', day: 'numeric', month: 'long' })}</div><div class="count num">${nf(n)}</div><div class="mut">${esc(h0.name.toLowerCase())}</div>`;
   if (h0.goal) h += `<div class="goal"><i style="width:${Math.min(100, n / h0.goal * 100)}%"></i></div><div class="mut">${n >= h0.goal ? `Doel van ${nf(h0.goal)} gehaald!` : `Nog ${nf(h0.goal - n)} tot je doel van ${nf(h0.goal)}`}</div>`;
   h += `<div class="quick">${[1, 3, 5, 10].map(q => `<button data-a="log" data-v="${q}">+${q}</button>`).join('')}</div>
@@ -287,7 +353,7 @@ function vHome() {
   const vals = Object.entries(tot).filter(x => x[1] > 0), rec = vals.sort((a, b) => b[1] - a[1])[0], mon = dkey(monday(Date.now()));
   const wk = sum(vals.filter(x => x[0] >= mon).map(x => x[1])), all = sum(vals.map(x => x[1])), st = dayStreak(tot);
   h += `<div class="tiles"><div class="tile"><b>${nf(wk)}</b><span>deze week</span></div><div class="tile"><b>${plural(st, 'dag', 'dagen')}</b><span>op rij</span></div><div class="tile"><b>${rec ? nf(rec[1]) : 0}</b><span>record${rec ? ' op ' + fdate(fromKey(rec[0]), { day: 'numeric', month: 'short' }) : ' op één dag'}</span></div><div class="tile"><b>${nf(all)}</b><span>totaal</span></div></div>`;
-  return h + '<button class="btn" data-a="habitedit">Naam en dagdoel aanpassen</button>';
+  return h + '<button class="btn" data-a="habitedit">Naam, dagdoel en spiergroepen</button>';
 }
 function heatmap(tot, sel, hb) {
   const W = 16, start = addDays(monday(Date.now()), -7 * (W - 1)), today = dkey(Date.now());
@@ -320,14 +386,13 @@ function vStats() {
   const ws = sorted(), now = new Date(), mon = monday(now);
   const inMonth = ws.filter(w => { const d = new Date(w.start); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).length;
   const inWeek = ws.filter(w => dkey(w.start) >= dkey(mon)).length;
-  let h = `<h1>Statistieken</h1><div class="tiles"><div class="tile"><b>${inWeek}</b><span>workouts deze week</span></div><div class="tile"><b>${inMonth}</b><span>workouts deze maand</span></div><div class="tile"><b>${plural(weekStreak(), 'week', 'weken')}</b><span>op rij getraind</span></div><div class="tile"><b>${ws.length}</b><span>workouts in totaal</span></div></div>`;
+  let h = `<h1>Statistieken</h1><div class="tiles"><div class="tile"><b>${inWeek}</b><span>workouts deze week</span></div><div class="tile"><b>${inMonth}</b><span>workouts deze maand</span></div><div class="tile"><b>${plural(weekStreak(), 'week', 'weken')}</b><span>op rij getraind</span></div><div class="tile"><b>${ws.length}</b><span>workouts in totaal</span></div></div>` + weekBody();
   if (ws.length) {
     const wk = [...Array(12)].map((_, i) => { const a = addDays(mon, -7 * (11 - i)), k = dkey(a); return [a, ws.filter(w => dkey(monday(w.start)) === k).length]; });
     const mx = Math.max(1, ...wk.map(x => x[1]));
     h += `<h2>Workouts per week</h2><div class="card"><div class="bars">${wk.map(([d, n]) => `<button data-tip="Week van ${fdate(d, { day: 'numeric', month: 'short' })}: ${plural(n, 'workout', 'workouts')}" aria-label="Week van ${fdate(d)}: ${n}">${n || ''}<i style="height:${n / mx * 100}px"></i></button>`).join('')}</div><div class="axis"><span>${fdate(wk[0][0], { day: 'numeric', month: 'short' })}</span><span>deze week</span></div></div>`;
-    const since = ui.period ? addDays(now, -ui.period).getTime() : 0, sel = ws.filter(w => w.start >= since);
-    const m = Object.fromEntries(muscleSets(sel)), rows = MUSCLES.map(x => [x, m[x] || 0]).sort((a, b) => b[1] - a[1]);
-    h += `<h2>Spiergroepen</h2><div class="card"><div class="seg" style="margin-bottom:14px">${[[30, '30 dagen'], [90, '90 dagen'], [0, 'Alles']].map(([k, l]) => `<button data-a="period" data-v="${k}" aria-pressed="${ui.period === k}">${l}</button>`).join('')}</div>${hbars(rows, ['set', 'sets'])}<p class="mut" style="margin:8px 0 0">Aantal sets per spiergroep</p></div>`;
+    const m = Object.fromEntries(muscleSets(...recent(ui.period))), rows = MUSCLES.map(x => [x, m[x] || 0]).sort((a, b) => b[1] - a[1]);
+    h += `<h2>Spiergroepen</h2><div class="card"><div class="seg" style="margin-bottom:14px">${[[30, '30 dagen'], [90, '90 dagen'], [0, 'Alles']].map(([k, l]) => `<button data-a="period" data-v="${k}" aria-pressed="${ui.period === k}">${l}</button>`).join('')}</div>${hbars(rows, ['set', 'sets'])}<p class="mut" style="margin:8px 0 0">Sets per spiergroep, naar aandeel. Thuis telt ${REPS_PER_SET} herhalingen als één set.</p></div>`;
     const kg = sum(ws.map(volume)), cnt = {};
     for (const w of ws) for (const id of new Set(w.entries.map(e => e.exId))) cnt[id] = (cnt[id] || 0) + 1;
     const fav = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0], dur = ws.map(duration).filter(x => x > 0);
@@ -337,10 +402,11 @@ function vStats() {
     h += '<h2>Weetjes</h2><div class="list">' + (kg ? it('Totaal verplaatst', nf(kg) + ' kg', funFact(kg)) : '') + (fav ? it('Favoriete oefening', esc(ex(fav[0]).name), plural(fav[1], 'workout', 'workouts')) : '')
       + it('Favoriete trainingsdag', DN[bd], plural(wd[bd], 'workout', 'workouts')) + (dur.length ? it('Gemiddelde duur', Math.round(sum(dur) / dur.length) + ' min') : '') + it('Sets in totaal', nf(sum(ws.flatMap(w => w.entries.map(e => e.sets.length))))) + '</div>';
   } else h += '<div class="card empty">Na je eerste workout zie je hier hoe vaak je traint en welke spiergroepen je het meest pakt.</div>';
-  return h + '<h2>Back-up</h2><div class="card"><p class="mut">Je gegevens staan alleen op dit toestel. Bewaar af en toe een back-up, bijvoorbeeld in iCloud of Bestanden.</p><button class="btn" data-a="export">Back-up maken</button><button class="btn" data-a="import">Back-up terugzetten</button></div>';
+  return h + '<h2>Back-up</h2><div class="card"><p class="mut">Je gegevens staan alleen op dit toestel. Bewaar af en toe een back-up, bijvoorbeeld in iCloud of Bestanden.</p><button class="btn" data-a="export">Back-up maken</button><button class="btn" data-a="import">Back-up terugzetten</button></div><p class="mut" style="text-align:center"><a href="https://www.flaticon.com/free-icon/man_10036300" target="_blank" rel="noopener" style="color:inherit">App-icoon van Flaticon</a></p>';
 }
 
 /* ---------- sheets ---------- */
+const musPicker = mus => `<div class="flabel">Hoeveel train je elke spiergroep?</div><div class="mus">${MUSCLES.map(m => `<div class="musrow"><span>${m}</span><div class="seg" role="group" aria-label="${m}">${LEVELS.map(([v, l]) => `<button type="button" data-a="smus" data-v="${m}" data-l="${v}" aria-pressed="${(mus[m] || 0) === v}">${l}</button>`).join('')}</div></div>`).join('')}</div>`;
 let sheet = null;
 function openSheet(s) { sheet = s; renderSheet(); }
 function closeSheet() { sheet = null; $('#sheet').innerHTML = ''; }
@@ -355,9 +421,9 @@ function renderSheet() {
     const used = s.id && db.workouts.concat(db.active || []).some(w => w.entries.some(e => e.exId === s.id));
     h = head(s.id ? 'Oefening bewerken' : 'Nieuwe oefening') + `<label class="f" for="exn">Naam</label><input id="exn" data-i="sname" value="${esc(s.name)}" placeholder="Bijv. Squat" autocomplete="off">
     <div class="flabel">Wat meet je?</div>` + (used ? `<p>${s.type === 'time' ? 'Tijd' : 'Gewicht'} <span class="mut">(vast, want je hebt al sets ingevuld)</span></p>` : `<div class="seg"><button data-a="stype" data-v="weight" aria-pressed="${s.type === 'weight'}">Gewicht</button><button data-a="stype" data-v="time" aria-pressed="${s.type === 'time'}">Tijd</button></div>`)
-    + `<div class="flabel">Spiergroepen</div><div class="chips">${MUSCLES.map(m => `<button class="chip" data-a="smus" data-v="${m}" aria-pressed="${s.muscles.includes(m)}">${m}</button>`).join('')}</div><button class="btn pri" data-a="exsave">Opslaan</button>`;
+    + `${musPicker(s.muscles)}<button class="btn pri" data-a="exsave">Opslaan</button>`;
   } else if (s.k === 'habit') {
-    h = head(s.id ? 'Oefening aanpassen' : 'Nieuwe thuisoefening') + `<form data-f="habit"><label class="f" for="hn">Naam</label><input id="hn" name="name" value="${esc(s.name)}" placeholder="Bijv. Push-ups" autocomplete="off"><label class="f" for="hg">Dagdoel (mag leeg)</label><input id="hg" name="goal" inputmode="numeric" value="${s.goal || ''}" autocomplete="off"><button class="btn pri">Opslaan</button></form>`;
+    h = head(s.id ? 'Oefening aanpassen' : 'Nieuwe thuisoefening') + `<form data-f="habit"><label class="f" for="hn">Naam</label><input id="hn" name="name" value="${esc(s.name)}" placeholder="Bijv. Push-ups" autocomplete="off"><label class="f" for="hg">Dagdoel (mag leeg)</label><input id="hg" name="goal" inputmode="numeric" value="${s.goal || ''}" autocomplete="off">${musPicker(s.muscles)}<button class="btn pri">Opslaan</button></form>`;
     if (s.id && db.habits.length > 1) h += '<button class="btn bad" data-a="habitdel">Verwijderen</button>';
   } else if (s.k === 'exmenu') {
     h = head(esc(ex(db.active.entries[s.i].exId).name)) + (s.i > 0 ? '<button class="btn" data-a="exup">Omhoog verplaatsen</button>' : '') + (s.i < db.active.entries.length - 1 ? '<button class="btn" data-a="exdown">Omlaag verplaatsen</button>' : '') + '<button class="btn bad" data-a="exrm">Uit workout halen</button>';
@@ -401,7 +467,7 @@ function finish() {
     db.workouts = db.workouts.filter(x => x.id !== a.editId);
   } else if (!a.backdated && Date.now() - a.start < 6 * 36e5) w.end = Date.now();
   db.workouts.push(w); db.active = null; save();
-  ui.just = a.editId ? null : w.id; ui.tab = 'train';
+  ui.tab = 'train';
   go('done', w.id);
 }
 const setOf = t => db.active.entries[t.dataset.e].sets[t.dataset.s];
@@ -425,10 +491,11 @@ async function exportData() {
 }
 function validBackup(d) {
   const arr = Array.isArray;
+  const okMus = m => arr(m) ? m.every(x => MUSCLES.includes(x)) : m && Object.entries(m).every(([k, v]) => MUSCLES.includes(k) && LEVELS.some(l => l[0] === v));
   return d && arr(d.exercises) && arr(d.workouts) && arr(d.habits) && d.habits.length && arr(d.logs)
-    && d.exercises.every(e => e.id && typeof e.name === 'string' && arr(e.muscles) && e.muscles.every(m => MUSCLES.includes(m)))
+    && d.exercises.every(e => e.id && typeof e.name === 'string' && okMus(e.muscles))
     && d.workouts.every(w => w.id && isFinite(w.start) && arr(w.entries) && w.entries.every(e => e.exId && arr(e.sets)))
-    && d.habits.every(h => h.id && typeof h.name === 'string')
+    && d.habits.every(h => h.id && typeof h.name === 'string' && (!h.muscles || okMus(h.muscles)))
     && d.logs.every(l => /^\d{4}-\d\d-\d\d$/.test(l.day) && isFinite(l.n));
 }
 function importData() {
@@ -438,7 +505,7 @@ function importData() {
       const d = JSON.parse(await i.files[0].text());
       if (!validBackup(d)) throw 0;
       if (!confirm(`Deze back-up bevat ${plural(d.workouts.length, 'workout', 'workouts')}. Al je huidige gegevens worden vervangen. Doorgaan?`)) return;
-      db = { ...fresh(), ...d }; save(); render();
+      db = migrate({ ...fresh(), ...d }); save(); render();
     } catch { alert('Dit bestand is geen geldige back-up van deze app.'); }
   };
   i.click();
@@ -446,9 +513,9 @@ function importData() {
 
 const A = {
   tab: v => { ui.tab = v; ui.view = null; ui.q = ''; if (v === 'home') ui.day = null; render(); },
-  back: () => { ui.just = null; go(ui.tab === 'ex' && ui.view === 'done' && ui.from ? 'exd' : null, ui.view === 'done' ? ui.from : null); },
+  back: () => { go(ui.tab === 'ex' && ui.view === 'done' && ui.from ? 'exd' : null, ui.view === 'done' ? ui.from : null); },
   start: () => startWorkout(defaultName()),
-  resume: () => go('editor'),
+  resume: () => { ui.tab = 'train'; go('editor'); },
   showall: () => { ui.all = true; render(); },
   open: v => { ui.from = ui.view === 'exd' ? ui.id : null; go('done', v); },
   finish, pick: () => openSheet({ k: 'pick' }),
@@ -487,16 +554,20 @@ const A = {
     save(); go('editor');
   },
   delw: () => { if (confirm('Deze workout definitief verwijderen? Dit kan ook je PR\'s veranderen.')) { db.workouts = db.workouts.filter(w => w.id !== ui.id); save(); A.back(); } },
-  exnew: () => openSheet({ k: 'ex', name: '', type: 'weight', muscles: [], pick: sheet?.k === 'pick' }),
-  exedit: () => { const e = ex(ui.id); openSheet({ k: 'ex', id: e.id, name: e.name, type: e.type, muscles: [...e.muscles] }); },
+  exnew: () => openSheet({ k: 'ex', name: '', type: 'weight', muscles: {}, pick: sheet?.k === 'pick' }),
+  exedit: () => { const e = ex(ui.id); openSheet({ k: 'ex', id: e.id, name: e.name, type: e.type, muscles: { ...e.muscles } }); },
   exopen: v => go('exd', v),
   stype: v => { sheet.type = v; renderSheet(); },
-  smus: v => { const m = sheet.muscles; m.includes(v) ? m.splice(m.indexOf(v), 1) : m.push(v); renderSheet(); },
+  smus: (v, t) => {
+    const l = +t.dataset.l;
+    if (l) sheet.muscles[v] = l; else delete sheet.muscles[v];
+    for (const b of t.parentNode.children) b.setAttribute('aria-pressed', b === t);
+  },
   exsave: () => {
     const s = sheet, name = s.name.trim();
     if (!name) return alert('Geef de oefening een naam.');
     if (db.exercises.some(e => !e.archived && e.id !== s.id && e.name.toLowerCase() === name.toLowerCase())) return alert('Je hebt al een oefening met deze naam.');
-    const muscles = MUSCLES.filter(m => s.muscles.includes(m)), id = s.id || uid();
+    const muscles = s.muscles, id = s.id || uid();
     if (s.id) Object.assign(ex(s.id), { name, type: s.type, muscles }); else db.exercises.push({ id, name, type: s.type, muscles });
     save(); closeSheet();
     if (s.pick && db.active) A.picked(id); else render();
@@ -508,12 +579,12 @@ const A = {
     if (used) ex(ui.id).archived = true; else db.exercises = db.exercises.filter(e => e.id !== ui.id);
     save(); go(null);
   },
-  examples: () => { EXAMPLES.forEach(([name, type, muscles]) => db.exercises.push({ id: uid(), name, type, muscles })); save(); if (sheet) renderSheet(); else render(); },
+  examples: () => { EXAMPLES.forEach(([name, type, muscles]) => db.exercises.push({ id: uid(), name, type, muscles: { ...muscles } })); save(); if (sheet) renderSheet(); else render(); },
   metric: v => { ui.metric = v; render(); },
   period: v => { ui.period = +v; render(); },
   habit: v => { ui.habit = v; render(); },
-  habitnew: () => openSheet({ k: 'habit', name: '', goal: 0 }),
-  habitedit: () => openSheet({ k: 'habit', ...curHabit() }),
+  habitnew: () => openSheet({ k: 'habit', name: '', goal: 0, muscles: {} }),
+  habitedit: () => openSheet({ k: 'habit', ...curHabit(), muscles: { ...curHabit().muscles } }),
   habitdel: delHabit,
   log: v => logReps(+v),
   unlog: v => { db.logs = db.logs.filter(l => l.id !== v); save(); render(); },
@@ -574,8 +645,8 @@ document.addEventListener('submit', e => {
   if (e.target.dataset.f === 'habit') {
     const name = f.get('name').trim(), goal = Math.round(num(f.get('goal')));
     if (!name) return alert('Geef de oefening een naam.');
-    if (sheet.id) Object.assign(db.habits.find(h => h.id === sheet.id), { name, goal });
-    else { const id = uid(); db.habits.push({ id, name, goal }); ui.habit = id; }
+    if (sheet.id) Object.assign(db.habits.find(h => h.id === sheet.id), { name, goal, muscles: sheet.muscles });
+    else { const id = uid(); db.habits.push({ id, name, goal, muscles: sheet.muscles }); ui.habit = id; }
     save(); closeSheet(); render();
   }
 });
@@ -586,6 +657,5 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && dkey(Date.now()) !== shownDay) { shownDay = dkey(Date.now()); if (!sheet) render(); }
 });
 
-if (db.active) ui.view = 'editor';
 render();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
